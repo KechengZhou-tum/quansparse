@@ -374,3 +374,13 @@ ssh orin "tar c ~/sparsedrive_deploy/orin_outputs" | ssh cloud "tar x -C /tmp"
 # 6. 4 路可视化
 "... python3.8 /tmp/viz_compare_3way.py --pytorch-pkl ... --int8-pkl ... --orin-pkl ... --gt-offset 3000 --frames 40"
 ```
+
+
+
+| 指标 | PyTorch FP32 | x86 INT8 | INT8 损失 |
+|---|---|---|---|
+| mAP | 0.2720 | 0.2633 | -3.2% |
+| pedestrian_AP | 0.6083 | 0.5947 | -2.2% |
+| vehicle_AP | 0.4797 | 0.4586 | -4.4% |
+| drivable_iou | 0.0106 | 0.0100 | -5.7% |
+| mean_map_iou | 0.0045 | 0.0042 | -5.7% |
