@@ -384,3 +384,17 @@ ssh orin "tar c ~/sparsedrive_deploy/orin_outputs" | ssh cloud "tar x -C /tmp"
 | vehicle_AP | 0.4797 | 0.4586 | -4.4% |
 | drivable_iou | 0.0106 | 0.0100 | -5.7% |
 | mean_map_iou | 0.0045 | 0.0042 | -5.7% |
+
+
+
+# Benchmark Statistics (ms, N=100)
+
+| Stage      |   mean | median |    p90 |    p99 |   std |
+| ---------- | -----: | -----: | -----: | -----: | ----: |
+| H2D        |   1.46 |   1.46 |   1.47 |   1.49 |  0.00 |
+| enqueueV3  |  88.87 |  88.74 |  89.28 |  89.48 |  0.26 |
+| D2H        |   0.05 |   0.05 |   0.06 |   0.08 |  0.00 |
+| Total      |  90.43 |  90.30 |  90.84 |  91.05 |  0.26 |
+
+**Steady-state FPS:** 11.06
+**Engine-only FPS:** 11.25
