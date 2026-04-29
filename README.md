@@ -1,115 +1,119 @@
-# UniAD Stage1 — Thor vs Orin 三档 Voxel 严格耗时对比
+# SparseDrive Thor vs Orin 部署 — 严格耗时对比
 
-**测试日期**：2026-04-29
-**测试场景**：`_eb` (68bfa5402fd0fcdf4ad7aceb), 30 帧 warm 1 + 29 帧统计
-**Build flag**：`--fp16 --int8 --best`（同事 Orin 原配方）
-**测量工具**：C++ inference_app (enqueueV3_stage1_*) 内置 timer + Python 聚合
+**测试日期**：Thor 2026-04-29 / Orin 2026-04-22
+**模型**：SparseDrive xhumanoid stage1 INT8+FP16 (temporal e2e perception+motion+map, 同一份 ONNX)
+**ONNX**：`sparsedrive_temporal_int8_v2.onnx` (164 MB)
+**Build flag**：`--fp16 --int8 --best`
 
 ---
 
 ## 完整对比表
 
-| 阶段 | **0.2m Thor** | 0.2m Orin | **0.15m Thor** | 0.15m Orin | **v5/0.1m Thor** | v5/0.1m Orin |
-|---|---|---|---|---|---|---|
-| BEV (HW) | 6400 (80×80) | 6400 | 12544 (112×112) | 12544 | 25600 (160×160) | 25600 |
-| num_query | 50 | 50 | 100 | 100 | 50 | 50 |
-| num_classes | 4 | 4 | 4 | 4 | 2 | 2 |
-| H2D (ms) | **0.45** | 2.01 | **1.03** | 3.67 | **1.85** | 7.01 |
-| PREPROC (ms) | **3.24** | - | **3.22** | - | **3.21** | 9.65 |
-| **GPU enqueueV3 (ms)** | **41.81** | 131.69 | **69.98** | 162.39 | **135.23** | 227.28 |
-| GPU median (ms) | 41.72 | - | 69.95 | - | 134.88 | 222.82 |
-| GPU std (ms) | 0.40 | - | 0.43 | - | 0.79 | 15.71 |
-| D2H (ms) | **0.22** | 0.61 | **0.36** | 0.89 | **0.63** | 1.54 |
-| **total H2D+GPU+D2H (ms)** | **42.48** | 134.30 | **71.37** | 166.94 | **137.70** | 235.82 |
+### C++ warm-loop benchmark (100 iter, 真实部署 latency)
 
----
-
-## Thor vs Orin 加速比
-
-| 模型 | Thor GPU | Orin GPU | **加速** | Thor total | Orin total | total 加速 |
-|---|---|---|---|---|---|---|
-| **0.2m** (BEV 6400) | 41.81 | 131.69 | **3.15x** ⭐ | 42.48 | 134.30 | **3.16x** |
-| **0.15m** (BEV 12544) | 69.98 | 162.39 | **2.32x** | 71.37 | 166.94 | **2.34x** |
-| **v5/0.1m** (BEV 25600) | 135.23 | 227.28 | **1.68x** | 137.70 | 235.82 | **1.71x** |
-
----
-
-## BEV 越小，Thor 加速越大（硬件特性）
-
-| 维度 | 0.1m → 0.15m | 0.15m → 0.2m |
-|---|---|---|
-| BEV size 比 | 25600 / 12544 = 2.04x | 12544 / 6400 = 1.96x |
-| Thor GPU 比 | 135.23 / 69.98 = 1.93x | 69.98 / 41.81 = 1.67x |
-| Orin GPU 比 | 227.28 / 162.39 = 1.40x | 162.39 / 131.69 = 1.23x |
-
-**规律**：
-- Thor GPU 倍数比 ≈ BEV 比，**符合 self-attention O(N²) 物理模型**
-- Orin GPU 倍数比远小于 BEV 比 → Orin 上大矩阵性能没"线性化"
-- **Thor Blackwell INT8 Tensor Core 在小矩阵上利用率高、大矩阵被 memory bandwidth bound** → BEV 越小加速越夸张
-
-**结论**：1.68x → 2.32x → 3.15x 加速差异不是量化 bug，是物理硬件特性。
-
----
-
-## 各 timer 含义
-
-| Timer | 在哪 | 量什么 | 备注 |
+| 阶段 | **Thor (TRT 10.13, SM 11.0 Blackwell)** | **Orin (TRT 10.4, SM 8.7 Ampere)** | **加速** |
 |---|---|---|---|
-| **LOAD** | CPU | 6 张 JPEG 磁盘读取 + libjpeg 软解码 | ~257 ms，**不计入推理流水线**；生产环境用相机直连或 NVJPEG 可降到 < 5 ms |
-| **H2D** | CUDA stream | uchar img + metadata (lidar2img, can_bus, l2g, timestamp 等) host → device | uchar 仅 3.3MB，比老版 float 13MB 小 4x |
-| **PREPROC** | GPU | 单个 fused kernel：uchar→float 类型转换 + normalize (per-channel mean/std) + resize + HWC→CHW layout | GPU-fused 设计，**不再经过 host pinned 中转** |
-| **GPU enqueueV3** | CUDA stream | TRT engine 的 enqueueV3 调用（推理本身） | 含 backbone / BEV transformer / track / map heads |
-| **D2H** | CUDA stream | engine 输出 (bev_embed, scores, labels, boxes, score_pred, things_masks_sorted 等) device → host | |
-
-### PREPROC 是 GPU 图像预处理（不是 CPU）
-
-- **uchar → float** 类型转换
-- **Normalize**（减 mean / 除 std，per-channel）
-- **Resize**（如果原图分辨率不是 768×960）
-- **HWC → CHW** layout 转置
-
-输出直接是 device 上的 float buffer（绑给 TRT engine 的 `img` input），不再经过 host pinned 中转。
-
-### vs 旧实现的差别（同事在 v5 时优化的版本）
-
-| 维度 | 老 enqueueV3_v5 e2e (CPU 多 kernel) | 新 GPU-fused (stage1_015m / stage1_v5 / stage1_02m) |
-|---|---|---|
-| 流程 | CPU normalize → host pinned (13MB float) → 再 cudaMemcpyAsync 到 device | uchar 3.3MB H2D → 单 kernel 在 device 就地处理 |
-| H2D 量 | 13MB float | 3.3MB uchar (1/4) |
-| Timer 归属 | 全算 H2D（看似 H2D 高） | H2D + PREPROC 拆开 |
-| 实际"输入传输+预处理"总和 | ~17.55 ms | **~4 ms** |
-| 节省 | - | 16-24 ms（去掉冗余 host pinned→pinned memcpy + CPU 阻塞 GPU 等待） |
-
-实际比较两版"输入传输+预处理"延迟时，**不要单看 H2D**，要看 **H2D + PREPROC 总和** 或 **GPU enqueueV3**（纯推理）。
+| H2D (ms) | 0.46 (median 0.46, p99 0.54) | 1.46 (median 1.46, p99 1.49) | **3.17x** |
+| **enqueueV3 (ms)** | **41.87** (median 41.86, p99 42.43, std 0.17) | **88.87** (median 88.74, p99 89.48, std 0.26) | **2.12x** |
+| D2H (ms) | 0.03 (median 0.03, p99 0.07) | 0.05 (median 0.05, p99 0.08) | **1.67x** |
+| **Total H2D+GPU+D2H (ms)** | **42.38** (median 42.37) | **90.43** (median 90.30) | **2.13x** |
+| **Steady-state FPS** | **23.60** | **11.06** | **2.13x** |
+| Engine-only FPS | 23.89 | 11.25 | 2.12x |
 
 ---
 
-## 量化正确性验证
+## Thor vs Orin 加速
 
-跟 Orin 备份的 `enqueueV3_stage1_015m/output_timing/trt_results.json` 数值对齐，30 帧每帧：
+```
+Orin total:  90.43 ms  → 11.06 FPS
+Thor total:  42.38 ms  → 23.60 FPS
 
-- **max_score 差**：mean ±0.03（Thor 略高更干净）
-- **label 集合**：完全一致 (0/1/2)
-- **box 数后段**：Thor 12 vs Orin 27（Thor 反而更干净，没那么多假阳性）
-- **绝对数值**：Thor 与 Orin 在统计意义上一致，Thor 量化路径正确
+Thor 加速 = 90.43 / 42.38 = 2.13x
+```
 
-**关键澄清**：vis 看到"很多框 / 后段累积假阳性"是 0.15m 模型本身特性（track query 持续保留 + _eb scene 域外），跟 Thor 量化无关。Orin 上跑也是这样且 Orin 更乱。
+---
+
+## 跟 UniAD stage1 三档加速对比
+
+| 模型 | BEV / 矩阵规模 | Thor GPU | Orin GPU | 加速 |
+|---|---|---|---|---|
+| UniAD 0.2m stage1 | BEV 6400 | 41.81 | 131.69 | **3.15x** |
+| **SparseDrive temporal** | **不依赖 BEV grid** | **41.87** | **88.87** | **2.12x** |
+| UniAD 0.15m stage1 | BEV 12544 | 69.98 | 162.39 | 2.32x |
+| UniAD v5/0.1m stage1 | BEV 25600 | 135.23 | 227.28 | 1.68x |
+
+**观察**：
+- SparseDrive Thor GPU 41.87 ms 跟 UniAD 0.2m stage1 41.81 ms **几乎完全一样**（巧合，但都在 Thor 上 ~42 ms）
+- SparseDrive 没有 BEV grid（用 anchor-based sparse query 而不是 dense BEV），所以加速比不跟 voxel size 走
+- SparseDrive 加速比 2.13x 比 UniAD 同 GPU 耗时档（0.2m, 3.15x）低 —— 因为 SparseDrive 含更多 transformer attention（DeformableAttentionAggr × 12）+ LayerNorm 206 个，这些 op 在 Blackwell 上加速幅度不如 Conv/MatMul
+
+---
+
+## 量化正确性验证 (Thor vs Orin 数值)
+
+跑同一份 100 帧 inputs，Thor 跟 Orin 输出 frame_0000 + 30 帧整体范数差：
+
+| 输出 | orin_norm | thor_norm | abs_diff mean | rel_diff |
+|---|---|---|---|---|
+| det_cls | 481.27 | 481.27 | 0.484 | **0.10%** |
+| det_box | 3522.06 | 3522.50 | 5.122 | **0.15%** |
+| map_cls | 77.68 | 77.71 | 0.086 | **0.11%** |
+| map_pts | 278.18 | 278.14 | 0.023 | **0.008%** |
+| new_cached_feature | 378.30 | 378.29 | 0.401 | **0.11%** |
+
+**所有关键输出整体范数差 < 0.2%** — Thor 量化数值跟 Orin 完全一致，跨硬件移植没有精度损失。
+
+---
+
+## Engine I/O 签名（不变）
+
+**Inputs (9)**：
+
+| name | shape | dtype | bytes |
+|---|---|---|---|
+| img | (1, 6, 3, 768, 960) | fp32 | 53,084,160 |
+| projection_mat | (1, 6, 4, 4) | fp32 | 384 |
+| image_wh | (1, 6, 2) | fp32 | 48 |
+| use_prev | (1,) | int32 | 4 |
+| prev_cached_feature | (1, 600, 256) | fp32 | 614,400 |
+| prev_cached_anchor | (1, 600, 11) | fp32 | 26,400 |
+| prev_confidence | (1, 600) | fp32 | 2,400 |
+| T_temp2cur | (1, 4, 4) | fp32 | 64 |
+| time_interval | (1,) | fp32 | 4 |
+
+**Outputs (8)**：det_cls (1,900,4) / det_box (1,900,11) / det_quality (1,900,2) / map_cls (1,100,3) / map_pts (1,100,40) / new_cached_feature / new_cached_anchor / new_confidence
+
+---
+
+## 运行环境对比
+
+| 项 | Thor (新) | Orin (旧) |
+|---|---|---|
+| TensorRT | **10.13.3.9** | 10.4.0.26 |
+| CUDA | **13.0** | 12.6 |
+| GPU | Thor Blackwell, SM 11.0, 20 SMs | Orin Ampere, SM 8.7 |
+| Engine 大小 | **113 MB** | 100 MB |
+| Plugin | libtensorrt_ops.so 1.2 MB | 同 plugin 源码，aarch64 SM_87 编 |
+| OS | Ubuntu 24.04 | L4T R36.4 (Ubuntu 22.04) |
 
 ---
 
 ## 关键路径
 
-### Thor 容器内
-- 0.2m engine：`UniAD/onnx/uniad_xhumanoid_02m_stage1_int8_thor.engine` (101M)
-- 0.15m engine：`UniAD/onnx/uniad_xhumanoid_015m_stage1_int8_thor_v2.engine` (124M)
-- v5 engine：`UniAD/onnx/uniad_xhumanoid_stage1_v5_int8_thor.engine` (174M)
-- 三个对应 C++ app：`inference_app/enqueueV3_stage1_{02m,015m,v5}/build/uniad`
-- 测试输入：`UniAD/nuscenes_np_015/uniad_trt_input` (6741 帧 _eb scene)
+### Thor
+- ONNX：`/home/nvidia/sparsedrive_thor/sparsedrive_temporal_int8_v2.onnx` (md5 `cc275289...`)
+- engine：`/home/nvidia/sparsedrive_thor/sparsedrive_thor_int8.engine` (113M)
+- plugin：`/home/nvidia/sparsedrive_thor/tensorrt_plugins/lib/libtensorrt_ops.so` (1.2M, c++17 + SM 110)
+- bench：`orin_bench/thor_bench` + `src/main.cpp`
+- 输入：`orin_inputs/` (102 帧 npz) + `orin_inputs_bin/` (100 帧 .bin, 5GB)
+- 输出：`thor_outputs/` (100 帧 npz)
+
+### Orin (备份)
+- 备份位置：`/home/mig/Downloads/Perception/migration_thor_20260429/orin_full_snapshot/sparsedrive_deploy/`
+- engine：`sparsedrive_orin_int8.engine` (100M, TRT 10.4 SM 87)
+- 部署文档：`/home/mig/Downloads/Perception/SparseDrive-main/quantization/DEPLOYMENT_SUMMARY.md`
 
 ### 本机回传
-- `/home/mig/Downloads/Perception/thor_results/v5_02m_stage1_30/` (vis + run.log + trt_results.json)
-- `/home/mig/Downloads/Perception/thor_results/v5_015m_stage1_30/`
-- `/home/mig/Downloads/Perception/thor_results/v5_stage1_30/`
-
-每档 30 帧 × 10 张图 = 300 张，每档 ~302MB。
+- `/home/mig/Downloads/Perception/thor_results/sparsedrive_outputs/` (100 帧 thor outputs npz)
+- `/home/mig/Downloads/Perception/thor_results/sparsedrive_thor/{thor_bench.log, run_thor.log}`
 **Engine-only FPS:** 11.25
